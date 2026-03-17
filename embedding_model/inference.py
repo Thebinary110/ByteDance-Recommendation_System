@@ -51,7 +51,7 @@ def recommend(user_id: str, top_k: int = 10, exclude: Set[str] = None) -> List[s
     scores: List[tuple] = []
     with torch.no_grad():
         u = user_emb.detach()
-        for item_id, item_emb in item_embeddings.items():
+        for item_id, item_emb in list(item_embeddings.items()):
             if item_id in _exclude:
                 continue
             scores.append((item_id, torch.dot(u, item_emb.detach()).item()))

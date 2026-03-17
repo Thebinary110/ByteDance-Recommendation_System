@@ -6,7 +6,7 @@ manipulation, no in-memory stores. All state lives in the API process.
 """
 
 import time
-from typing import Dict, List
+from typing import Dict, List, Union
 
 import requests
 
@@ -46,8 +46,11 @@ def get_user_data(user_id: str) -> Dict:
     return {}
 
 
-def get_recommendations(user_id: str, top_k: int = 10) -> List[str]:
-    """Return MLP-reranked recommendation list for user_id."""
+def get_recommendations(user_id: str, top_k: int = 10) -> List[Dict]:
+    """
+    Return enriched recommendation list for user_id.
+    Each item: {item_id, title, genres}.
+    """
     r = _get(f"/recommend/{user_id}?top_k={top_k}")
     if r and r.status_code == 200:
         return r.json().get("recommendations", [])
