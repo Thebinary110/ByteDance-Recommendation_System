@@ -25,7 +25,7 @@ from embedding_store import user_embeddings  # embedding_model
 from inference import recommend as retrieve  # embedding_model  (FAISS / linear)
 from rank_inference import rank_items        # ranking_model    (MLP reranker)
 from movie_service import get_movie          # utils
-from explanation_service import build_explanation, build_liked_genre_cache  # api/services
+from services.explanation_service import build_explanation, build_liked_genre_cache
 
 
 def get_recommendations(user_id: str, top_k: int = 10) -> List[Dict]:
