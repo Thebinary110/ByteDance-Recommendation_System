@@ -23,7 +23,7 @@ if _UTILS_DIR not in sys.path:
 from user_store import get_user              # feature_store
 from embedding_store import user_embeddings  # embedding_model
 from inference import recommend as retrieve  # embedding_model  (FAISS / linear)
-from rank_inference import rank_items        # ranking_model    (MLP reranker)
+from deepfm_inference import rank_items      # deepfm           (DeepFM reranker)
 from movie_service import get_movie          # utils
 from services.explanation_service import build_explanation, build_liked_genre_cache
 

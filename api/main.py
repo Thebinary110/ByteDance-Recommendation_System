@@ -39,9 +39,10 @@ from routes.user_routes import router as user_router
 def _start_pipeline() -> None:
     """
     Start a single daemon thread that runs one asyncio event loop containing
-    three concurrent coroutines:
-      - produce()           — streams events from CSV into both queues
+    four concurrent coroutines:
+      - produce()           — streams events from CSV into all queues
       - ranking_consume()   — trains embedding model + MLP ranker
+      - deepfm_consume()    — trains DeepFM ranker on 'like' events
       - fs_consume()        — populates _store (likes / dislikes / history)
 
     All queues are created inside that event loop so there is no cross-loop
@@ -52,10 +53,13 @@ def _start_pipeline() -> None:
     from user_store import update_user            # feature_store
     from producer import produce                  # streaming
     from run_ranker import _consume as ranking_consume  # ranking_model
+    from deepfm_trainer import train_step         # deepfm
+    from embedding_store import user_embeddings, item_embeddings  # embedding_model
 
     async def _combined() -> None:
         ranking_queue = register_consumer("ranking_pipeline")
         fs_queue      = register_consumer("feature_store_api")
+        deepfm_queue  = register_consumer("deepfm_pipeline")
 
         async def _fs_consume() -> None:
             while True:
@@ -71,17 +75,36 @@ def _start_pipeline() -> None:
                 )
                 fs_queue.task_done()
 
+        async def _deepfm_consume() -> None:
+            while True:
+                event = await deepfm_queue.get()
+                if event is None:
+                    deepfm_queue.task_done()
+                    break
+                # Attach detached embeddings so train_step can call build_features
+                uid = str(event["user_id"])
+                iid = str(event["item_id"])
+                u_tensor = user_embeddings.get(uid)
+                i_tensor = item_embeddings.get(iid)
+                if u_tensor is not None and i_tensor is not None:
+                    enriched = dict(event)
+                    enriched["user_emb"] = u_tensor.detach()
+                    enriched["item_emb"] = i_tensor.detach()
+                    train_step(enriched)
+                deepfm_queue.task_done()
+
         await asyncio.gather(
             produce(),
             ranking_consume(ranking_queue),
             _fs_consume(),
+            _deepfm_consume(),
         )
 
     def _run() -> None:
         asyncio.run(_combined())
 
     threading.Thread(target=_run, name="ranking-pipeline", daemon=True).start()
-    logger.info("Pipeline thread started (ranking + feature-store in one event loop)")
+    logger.info("Pipeline thread started (ranking + DeepFM + feature-store in one event loop)")
 
 
 # ── lifespan ──────────────────────────────────────────────────────────────────
