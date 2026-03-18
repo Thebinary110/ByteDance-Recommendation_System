@@ -2,18 +2,18 @@
 Explainability engine — answers "why was this item recommended?"
 
 For each (user, recommended_item) pair it produces:
-  reason_items  — titles of the user's liked items most similar to the recommendation
-  reason_scores — cosine similarity expressed as a percentage (bonus)
-  shared_genres — genres the recommendation shares with the user's liked items (bonus)
+  reason_items   — titles of the user's liked items most similar (embedding cosine)
+  reason_scores  — cosine similarity expressed as a percentage
+  shared_genres  — genres the recommendation shares with the user's liked items
+  semantic_reason — titles of user's liked items most conceptually similar
+                    (MovieLens genome tag vectors)
 
 Performance notes:
-  - Cosine similarity is computed on 32-dim float32 vectors (~880 ops for a user
-    with 88 likes × 10 recommendations — negligible latency).
-  - .detach().numpy().copy() is used so the numpy array is a stable snapshot
-    that is unaffected if the training thread modifies the tensor's .data in-place.
-  - item_embeddings.get(key) is a single dict lookup (no iteration), so no
-    "changed size during iteration" risk.
-  - liked_genres is computed once per call and reused across genre overlap check.
+  - Embedding cosine similarity: 32-dim float32 vectors, negligible latency.
+  - Semantic cosine similarity: TAG_DIM-dim vectors; computed on demand, cached
+    per session via Python's import-time module state in semantic_vector.py.
+  - .detach().numpy().copy() avoids data-race with training thread's in-place updates.
+  - liked_genre_cache computed once per request, reused across all 10 items.
 """
 
 import os
@@ -22,15 +22,18 @@ from typing import Dict, List, Tuple
 
 import numpy as np
 
-# utils/ (project root) must be on sys.path for movie_service
-_ROOT      = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
-_UTILS_DIR = os.path.join(_ROOT, "utils")
-if _UTILS_DIR not in sys.path:
-    sys.path.insert(0, _UTILS_DIR)
+# utils/ and semantic/ must be on sys.path
+_ROOT         = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+_UTILS_DIR    = os.path.join(_ROOT, "utils")
+_SEMANTIC_DIR = os.path.join(_ROOT, "semantic")
+for _p in (_UTILS_DIR, _SEMANTIC_DIR):
+    if _p not in sys.path:
+        sys.path.insert(0, _p)
 
-from embedding_store import item_embeddings  # embedding_model
-from user_store import get_user              # feature_store
-from movie_service import get_movie          # utils
+from embedding_store import item_embeddings          # embedding_model
+from user_store import get_user                      # feature_store
+from movie_service import get_movie                  # utils
+from semantic_similarity import semantic_similarity  # semantic
 
 
 # ---------------------------------------------------------------------------
@@ -107,6 +110,30 @@ def get_shared_genres(
     return [g for g in target_genres if g in shared]   # preserve genre order
 
 
+def get_top_semantic_items(
+    user_id: str,
+    item_id: str,
+    top_n: int = 2,
+) -> List[Tuple[str, float]]:
+    """
+    Return top_n (liked_item_id, semantic_similarity) pairs whose genome tag
+    vectors are most similar to the target item's tag vector.
+    Returns [] if user has no likes or item has no genome data.
+    """
+    user = get_user(user_id)
+    if not user or not user["likes"]:
+        return []
+
+    sims: List[Tuple[str, float]] = []
+    for liked_id in user["likes"]:
+        score = semantic_similarity(item_id, liked_id)
+        if score > 0.0:
+            sims.append((liked_id, score))
+
+    sims.sort(key=lambda x: x[1], reverse=True)
+    return sims[:top_n]
+
+
 def build_explanation(
     user_id: str,
     item_id: str,
@@ -117,7 +144,8 @@ def build_explanation(
     Pass liked_genre_cache (pre-computed per-user genre union) to avoid
     redundant lookups when calling this inside a loop over ranked items.
     """
-    similar = get_top_similar_liked_items(user_id, item_id, top_n=2)
+    similar  = get_top_similar_liked_items(user_id, item_id, top_n=2)
+    semantic = get_top_semantic_items(user_id, item_id, top_n=2)
 
     reason_items:  List[str]   = []
     reason_scores: List[float] = []
@@ -125,12 +153,14 @@ def build_explanation(
         reason_items.append(get_movie(liked_id)["title"])
         reason_scores.append(round(score * 100, 1))
 
+    semantic_reason: List[str] = [get_movie(i)["title"] for i, _ in semantic]
     shared_genres = get_shared_genres(item_id, user_id, liked_genre_cache)
 
     return {
-        "reason_items":  reason_items,
-        "reason_scores": reason_scores,
-        "shared_genres": shared_genres,
+        "reason_items":   reason_items,
+        "reason_scores":  reason_scores,
+        "shared_genres":  shared_genres,
+        "semantic_reason": semantic_reason,
     }
 
 
