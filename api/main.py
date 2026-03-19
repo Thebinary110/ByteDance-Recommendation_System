@@ -40,11 +40,12 @@ from routes.user_routes import router as user_router
 def _start_pipeline() -> None:
     """
     Start a single daemon thread that runs one asyncio event loop containing
-    four concurrent coroutines:
-      - produce()           — streams events from CSV into all queues
-      - ranking_consume()   — trains embedding model + MLP ranker
-      - deepfm_consume()    — trains DeepFM ranker on 'like' events
-      - fs_consume()        — populates _store (likes / dislikes / history)
+    five concurrent coroutines:
+      - produce()            — streams events from CSV into all queues
+      - ranking_consume()    — trains embedding model (32-dim) + MLP ranker
+      - deepfm_consume()     — trains DeepFM ranker on 'like' events
+      - fs_consume()         — populates _store (likes / dislikes / history)
+      - tt_consume()         — trains Two-Tower retrieval model (64-dim)
 
     All queues are created inside that event loop so there is no cross-loop
     asyncio.Queue conflict (which occurs when a Queue is created in uvicorn's
@@ -54,13 +55,15 @@ def _start_pipeline() -> None:
     from user_store import update_user            # feature_store
     from producer import produce                  # streaming
     from run_ranker import _consume as ranking_consume  # ranking_model
-    from deepfm_trainer import train_step         # deepfm
+    from deepfm_trainer import train_step as deepfm_train_step  # deepfm
+    from tt_trainer import train_step as tt_train_step           # two_tower
     from embedding_store import user_embeddings, item_embeddings  # embedding_model
 
     async def _combined() -> None:
         ranking_queue = register_consumer("ranking_pipeline")
         fs_queue      = register_consumer("feature_store_api")
         deepfm_queue  = register_consumer("deepfm_pipeline")
+        tt_queue      = register_consumer("two_tower_pipeline")
 
         async def _fs_consume() -> None:
             while True:
@@ -76,29 +79,50 @@ def _start_pipeline() -> None:
                 )
                 fs_queue.task_done()
 
+        TRAIN_EVERY_N_EVENTS = 3  # call training step once every N events
+
+        _deepfm_counter = 0
+
         async def _deepfm_consume() -> None:
+            nonlocal _deepfm_counter
             while True:
                 event = await deepfm_queue.get()
                 if event is None:
                     deepfm_queue.task_done()
                     break
-                # Attach detached embeddings so train_step can call build_features
-                uid = str(event["user_id"])
-                iid = str(event["item_id"])
-                u_tensor = user_embeddings.get(uid)
-                i_tensor = item_embeddings.get(iid)
-                if u_tensor is not None and i_tensor is not None:
-                    enriched = dict(event)
-                    enriched["user_emb"] = u_tensor.detach()
-                    enriched["item_emb"] = i_tensor.detach()
-                    train_step(enriched)
+                _deepfm_counter += 1
+                if _deepfm_counter % TRAIN_EVERY_N_EVENTS == 0:
+                    uid = str(event["user_id"])
+                    iid = str(event["item_id"])
+                    u_tensor = user_embeddings.get(uid)
+                    i_tensor = item_embeddings.get(iid)
+                    if u_tensor is not None and i_tensor is not None:
+                        enriched = dict(event)
+                        enriched["user_emb"] = u_tensor.detach()
+                        enriched["item_emb"] = i_tensor.detach()
+                        deepfm_train_step(enriched)
                 deepfm_queue.task_done()
+
+        _tt_counter = 0
+
+        async def _tt_consume() -> None:
+            nonlocal _tt_counter
+            while True:
+                event = await tt_queue.get()
+                if event is None:
+                    tt_queue.task_done()
+                    break
+                _tt_counter += 1
+                if _tt_counter % TRAIN_EVERY_N_EVENTS == 0:
+                    tt_train_step(event)
+                tt_queue.task_done()
 
         await asyncio.gather(
             produce(),
             ranking_consume(ranking_queue),
             _fs_consume(),
             _deepfm_consume(),
+            _tt_consume(),
         )
 
     def _run() -> None:

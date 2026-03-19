@@ -647,6 +647,154 @@ ranking_model/
 
 ---
 
-## Stage 9 (upcoming): API Layer
+---
 
-Will expose the full ranking pipeline via REST endpoints.
+## Current System (Stages 9–15): Full Production Pipeline
+
+### One-time setup (run once, results cached to disk)
+
+```bash
+python utils/movie_loader.py       # builds data/processed/movie_map.pkl
+python utils/link_loader.py        # builds data/processed/link_map.pkl
+python semantic/tag_loader.py      # builds data/processed/movie_tags.pkl
+```
+
+---
+
+### Running the streaming + API system
+
+```bash
+# Optional: TMDB API key for movie poster images
+set TMDB_API_KEY=your_key_here     # Windows
+# export TMDB_API_KEY=your_key_here
+
+uvicorn api.main:app --reload --port 8000
+```
+
+The API starts these background coroutines automatically:
+
+| Coroutine | Role |
+|---|---|
+| `produce()` | streams events.csv into all queues |
+| `ranking_consume()` | trains two-tower (32-dim) + MLP ranker |
+| `deepfm_consume()` | trains DeepFM ranker |
+| `tt_consume()` | trains Two-Tower retrieval (64-dim) |
+| `fs_consume()` | updates user feature store |
+
+**Swagger UI:** http://localhost:8000/docs
+
+### Running the Streamlit frontend
+
+```bash
+# In a separate terminal:
+streamlit run frontend/app.py
+```
+
+**Frontend:** http://localhost:8501
+
+---
+
+### API endpoints
+
+| Endpoint | Description |
+|---|---|
+| `GET /` | Health check |
+| `GET /users` | All users with embeddings |
+| `GET /users/{user_id}` | User profile (likes, dislikes, history) |
+| `GET /recommend/{user_id}?top_k=10` | Top-K recommendations |
+| `GET /stats` | System stats (users, items, FAISS status) |
+| `GET /metrics` | Latest evaluation metrics |
+
+```bash
+curl http://localhost:8000/recommend/1?top_k=5
+curl http://localhost:8000/metrics
+curl http://localhost:8000/stats
+```
+
+---
+
+### Evaluation
+
+#### Online (automatic during streaming)
+
+Metrics are computed every `EVAL_INTERVAL = 50,000` events and logged:
+
+```
+[EVAL] precision@10=0.0821  recall@10=0.0340  hit_rate@10=0.3150  users=4200
+```
+
+Also readable via API (returns `{"status": "no evaluation yet"}` before the first 50k events):
+
+```bash
+curl http://localhost:8000/metrics
+```
+
+#### Offline (standalone, no API required)
+
+```bash
+python evaluation/run_evaluation.py
+```
+
+Loads 50k events from events.csv, trains the embedding model, rebuilds FAISS,
+then runs evaluation. Takes ~35–60 seconds.
+
+Expected output:
+```
+--- EVALUATION RESULTS ---
+  precision@10  : 0.XXXX
+  recall@10     : 0.XXXX
+  hit_rate@10   : 0.XXXX
+  users evaluated  : XXX
+--------------------------
+```
+
+To evaluate more data (slower but better metrics), edit `SAMPLE_SIZE` in `evaluation/run_evaluation.py`.
+
+---
+
+### Common failure cases
+
+**`precision=0, recall=0, users_evaluated=0` from run_evaluation.py**
+
+Cause 1: user_store is empty (fresh process).
+Fix: `run_evaluation.py` now loads events.csv automatically.
+
+Cause 2: no user embeddings trained.
+Fix: script calls `train_on_event()` while loading events.
+
+Cause 3: all users filtered by `MIN_INTERACTIONS` threshold.
+Fix: script uses `MIN_INTERACTIONS=5` (reduced from default 10) and
+auto-reduces further to 3 if dataset is still empty.
+
+**`uvicorn: address already in use`**
+
+```bash
+taskkill /F /IM python.exe    # Windows — kills all Python processes
+uvicorn api.main:app --reload --port 8000
+```
+
+**`ModuleNotFoundError` for any backend module**
+
+Always run from the project root (the directory containing `api/`, `evaluation/`, etc.):
+
+```bash
+cd "Recommendation System"
+python evaluation/run_evaluation.py
+```
+
+**FAISS not built yet (empty recommendations)**
+
+FAISS builds after the first 20,000 streaming events.
+Check: `GET /stats` → `"faiss_built": false`
+Fix: wait, or reduce `FAISS_REBUILD_INTERVAL` in `embedding_model/emb_config.py`.
+
+**OpenBLAS / memory error on startup**
+
+Multiple Python processes loading FAISS simultaneously.
+Fix: `taskkill /F /IM python.exe`, then restart once.
+
+**Poster images not loading**
+
+Set `TMDB_API_KEY` environment variable before starting uvicorn.
+Without it, poster field returns `null` and a dark placeholder renders instead.
+IMDb links always work regardless of the key.

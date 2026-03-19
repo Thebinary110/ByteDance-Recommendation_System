@@ -39,9 +39,17 @@ from metrics import hit_rate_at_k, precision_at_k, recall_at_k
 from eval_config import TOP_K, TOP_K_CANDIDATES
 
 
-def evaluate() -> dict:
+def evaluate(
+    min_interactions: int   = None,
+    test_ratio:       float = None,
+) -> dict:
     """
     Run offline evaluation against the current live user_store.
+
+    Parameters
+    ----------
+    min_interactions : override eval_config default for dataset building
+    test_ratio       : override eval_config default for dataset building
 
     Returns a dict:
         {
@@ -51,7 +59,10 @@ def evaluate() -> dict:
             "users_evaluated": int,
         }
     """
-    dataset = build_eval_dataset()
+    dataset = build_eval_dataset(
+        min_interactions=min_interactions,
+        test_ratio=test_ratio,
+    )
     if not dataset:
         return {
             f"precision@{TOP_K}": 0.0,

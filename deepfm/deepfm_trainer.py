@@ -1,122 +1,135 @@
 """
-DeepFM trainer — online training step called once per event.
+DeepFM trainer — mini-batch training for high-throughput pipelines.
 
-One positive sample (user liked item) + one hard negative (random unseen item)
-per event.  BCEWithLogitsLoss, Adam optimiser, lr=1e-3.
+Stage 15.6 change: per-event → mini-batch.
 
-The model and optimiser are module-level singletons shared with deepfm_inference.
+Events are buffered until BATCH_SIZE "like" events accumulate, then a single
+forward + backward + optimizer.step() is executed over all positives and their
+random negatives in one vectorised pass.  This amortises Python/PyTorch overhead
+across the whole batch instead of paying it per event.
+
+Batch layout (BATCH_SIZE=32):
+  rows 0, 2, 4, ...  — positives  (label = 1)
+  rows 1, 3, 5, ...  — negatives  (label = 0)
+  total rows = BATCH_SIZE * 2 = 64
+
+BCEWithLogitsLoss, Adam lr=1e-3.
+The model / optimiser are module-level singletons shared with deepfm_inference.
 """
 
 import logging
 import random
+from typing import List
 
 import torch
-import torch.nn.functional as F
 from torch import nn
 
-from deepfm_model import _model, NUM_ITEMS, EMBED_DIM
+from deepfm_model import _model, NUM_ITEMS
 from feature_builder import build_features
 
 log = logging.getLogger("deepfm.trainer")
 
-# ---------------------------------------------------------------------------
-# Optimiser — shares the same _model singleton
-# ---------------------------------------------------------------------------
+BATCH_SIZE = 32   # like-events to accumulate before one training step
+
 _optimizer = torch.optim.Adam(_model.parameters(), lr=1e-3)
 _criterion = nn.BCEWithLogitsLoss()
+
+# Internal buffer — accumulates enriched like-events
+_event_buffer: List[dict] = []
 
 
 # ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------
 
-def _to_tensors(feat: dict) -> tuple:
-    """Convert a build_features() dict to GPU-ready tensors (all on CPU here)."""
-    return (
-        torch.tensor([feat["user_id_int"]], dtype=torch.long),
-        torch.tensor([feat["item_id_int"]], dtype=torch.long),
-        torch.tensor(feat["user_emb"],  dtype=torch.float32).unsqueeze(0),
-        torch.tensor(feat["item_emb"],  dtype=torch.float32).unsqueeze(0),
-        torch.tensor(feat["genre_vec"], dtype=torch.float32).unsqueeze(0),
-    )
-
-
 def _random_neg_item(exclude_id: str) -> str:
-    """Sample a random item_id (str) that is not the positive item."""
     while True:
         neg = str(random.randint(1, NUM_ITEMS - 1))
         if neg != exclude_id:
             return neg
 
 
-# ---------------------------------------------------------------------------
-# Public train step
-# ---------------------------------------------------------------------------
-
-def train_step(event: dict) -> float:
+def _train_batch(batch: List[dict]) -> float:
     """
-    Process one streaming event.
-
-    Parameters
-    ----------
-    event : dict
-        Must contain: user_id, item_id, event_type,
-                      user_emb (detached tensor), item_emb (detached tensor).
-        Only 'like' events contribute a positive training signal.
-
-    Returns
-    -------
-    float
-        Loss value (0.0 for non-like events).
+    Build a tensor batch from buffered events and execute one training step.
+    Each event contributes one positive row and one negative row.
     """
-    if event.get("event_type") != "like":
+    user_id_ints, item_id_ints = [], []
+    user_vecs, item_vecs, genre_vecs = [], [], []
+    labels = []
+
+    for event in batch:
+        user_id  = str(event["user_id"])
+        item_id  = str(event["item_id"])
+        user_emb = event["user_emb"]
+        item_emb = event["item_emb"]
+
+        try:
+            pos_feat = build_features(user_id, item_id, user_emb, item_emb)
+        except Exception as exc:
+            log.debug("build_features pos failed (%s, %s): %s", user_id, item_id, exc)
+            continue
+
+        neg_item_id = _random_neg_item(item_id)
+        try:
+            neg_feat = build_features(user_id, neg_item_id, user_emb, item_emb)
+        except Exception as exc:
+            log.debug("build_features neg failed: %s", exc)
+            continue
+
+        # Positive row
+        user_id_ints.append(pos_feat["user_id_int"])
+        item_id_ints.append(pos_feat["item_id_int"])
+        user_vecs.append(pos_feat["user_emb"])
+        item_vecs.append(pos_feat["item_emb"])
+        genre_vecs.append(pos_feat["genre_vec"])
+        labels.append(1.0)
+
+        # Negative row
+        user_id_ints.append(neg_feat["user_id_int"])
+        item_id_ints.append(neg_feat["item_id_int"])
+        user_vecs.append(neg_feat["user_emb"])
+        item_vecs.append(neg_feat["item_emb"])
+        genre_vecs.append(neg_feat["genre_vec"])
+        labels.append(0.0)
+
+    if not labels:
         return 0.0
 
-    user_id  = str(event["user_id"])
-    item_id  = str(event["item_id"])
-    user_emb = event["user_emb"]   # already detached tensor
-    item_emb = event["item_emb"]   # already detached tensor
-
-    # --- positive sample ---
-    try:
-        pos_feat = build_features(user_id, item_id, user_emb, item_emb)
-    except Exception as exc:
-        log.warning("build_features failed for pos (%s, %s): %s", user_id, item_id, exc)
-        return 0.0
-
-    # --- negative sample (random unseen item, reuse user_emb) ---
-    neg_item_id = _random_neg_item(item_id)
-    try:
-        neg_feat = build_features(user_id, neg_item_id, user_emb, item_emb)
-    except Exception as exc:
-        log.warning("build_features failed for neg (%s, %s): %s", user_id, neg_item_id, exc)
-        return 0.0
-
-    # --- batch: [positive, negative] ---
-    def _cat(key):
-        return torch.cat([
-            torch.tensor(pos_feat[key] if not isinstance(pos_feat[key], int) else [pos_feat[key]]),
-            torch.tensor(neg_feat[key] if not isinstance(neg_feat[key], int) else [neg_feat[key]]),
-        ], dim=0)
-
-    user_ids   = torch.tensor([pos_feat["user_id_int"], neg_feat["user_id_int"]], dtype=torch.long)
-    item_ids   = torch.tensor([pos_feat["item_id_int"], neg_feat["item_id_int"]], dtype=torch.long)
-    user_vecs  = torch.tensor(
-        [pos_feat["user_emb"], neg_feat["user_emb"]], dtype=torch.float32
-    )
-    item_vecs  = torch.tensor(
-        [pos_feat["item_emb"], neg_feat["item_emb"]], dtype=torch.float32
-    )
-    genre_vecs = torch.tensor(
-        [pos_feat["genre_vec"], neg_feat["genre_vec"]], dtype=torch.float32
-    )
-    labels = torch.tensor([1.0, 0.0], dtype=torch.float32)
+    uid_t  = torch.tensor(user_id_ints, dtype=torch.long)
+    iid_t  = torch.tensor(item_id_ints, dtype=torch.long)
+    uvec_t = torch.tensor(user_vecs,  dtype=torch.float32)
+    ivec_t = torch.tensor(item_vecs,  dtype=torch.float32)
+    gvec_t = torch.tensor(genre_vecs, dtype=torch.float32)
+    lbl_t  = torch.tensor(labels,     dtype=torch.float32)
 
     _model.train()
     _optimizer.zero_grad()
-    logits = _model(user_ids, item_ids, user_vecs, item_vecs, genre_vecs)
-    loss   = _criterion(logits, labels)
+    logits = _model(uid_t, iid_t, uvec_t, ivec_t, gvec_t)
+    loss   = _criterion(logits, lbl_t)
     loss.backward()
     _optimizer.step()
 
     return loss.item()
+
+
+# ---------------------------------------------------------------------------
+# Public API
+# ---------------------------------------------------------------------------
+
+def train_step(event: dict) -> float:
+    """
+    Buffer one event.  Executes a training step only when BATCH_SIZE like-events
+    have accumulated.  Returns the batch loss at that point, or 0.0 otherwise.
+    """
+    if event.get("event_type") != "like":
+        return 0.0
+
+    _event_buffer.append(event)
+
+    if len(_event_buffer) < BATCH_SIZE:
+        return 0.0
+
+    batch = _event_buffer.copy()
+    _event_buffer.clear()
+    return _train_batch(batch)

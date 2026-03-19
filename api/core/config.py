@@ -23,7 +23,8 @@ _DEEPFM_DIR   = os.path.join(_ROOT, "deepfm")
 _UTILS_DIR    = os.path.join(_ROOT, "utils")
 _SEMANTIC_DIR = os.path.join(_ROOT, "semantic")
 _EVAL_DIR     = os.path.join(_ROOT, "evaluation")
+_TT_DIR       = os.path.join(_ROOT, "two_tower")
 
-for _p in (_STREAM_DIR, _RANKING_DIR, _EMB_DIR, _FS_DIR, _DEEPFM_DIR, _UTILS_DIR, _SEMANTIC_DIR, _EVAL_DIR):
+for _p in (_STREAM_DIR, _RANKING_DIR, _EMB_DIR, _FS_DIR, _DEEPFM_DIR, _UTILS_DIR, _SEMANTIC_DIR, _EVAL_DIR, _TT_DIR):
     if _p not in sys.path:
         sys.path.insert(0, _p)

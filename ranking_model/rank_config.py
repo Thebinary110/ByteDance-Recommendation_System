@@ -12,5 +12,5 @@ LEARNING_RATE: float = 0.001   # Adam learning rate
 TOP_K_CANDIDATES: int = 50   # items retrieved from FAISS before reranking
 TOP_K_FINAL: int      = 10   # items returned after MLP reranking
 
-FAISS_REBUILD_INTERVAL: int = 20_000  # rebuild FAISS index every N events
-LOG_INTERVAL: int           = 10_000  # log + sample recommendations every N events
+FAISS_REBUILD_INTERVAL: int = 50_000  # rebuild FAISS index every N events
+LOG_INTERVAL: int           = 20_000  # log + sample recommendations every N events
