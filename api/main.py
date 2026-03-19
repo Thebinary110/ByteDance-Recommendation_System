@@ -29,6 +29,7 @@ if str(_API_DIR) not in sys.path:
 # This must happen before any service module is imported.
 from core.config import API_TITLE, API_VERSION  # noqa: E402 (intentional order)
 from utils.logger import logger
+from routes.evaluation_routes import router as eval_router
 from routes.recommendation_routes import router as rec_router
 from routes.stats_routes import router as stats_router
 from routes.user_routes import router as user_router
@@ -129,6 +130,7 @@ app = FastAPI(
 app.include_router(user_router)
 app.include_router(rec_router)
 app.include_router(stats_router)
+app.include_router(eval_router)
 
 
 @app.get("/", tags=["health"])

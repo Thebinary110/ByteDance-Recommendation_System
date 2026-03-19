@@ -43,14 +43,18 @@ _ROOT          = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 _RANKING_DIR   = os.path.dirname(os.path.abspath(__file__))
 _EMB_DIR       = os.path.join(_ROOT, "embedding_model")
 _STREAMING_DIR = os.path.join(_ROOT, "streaming")
+_FS_DIR        = os.path.join(_ROOT, "feature_store")
+_DEEPFM_DIR    = os.path.join(_ROOT, "deepfm")
+_EVAL_DIR      = os.path.join(_ROOT, "evaluation")
 
-sys.path.insert(0, _STREAMING_DIR)
-sys.path.insert(0, _EMB_DIR)
-sys.path.insert(0, _RANKING_DIR)
+for _p in (_STREAMING_DIR, _EMB_DIR, _RANKING_DIR, _FS_DIR, _DEEPFM_DIR, _EVAL_DIR):
+    if _p not in sys.path:
+        sys.path.insert(0, _p)
 
 from embedding_store import embedding_counts
 from faiss_index import faiss_index
 from inference import recommend as retrieve    # FAISS-backed retrieval
+from online_tracker import track_event        # evaluation
 from producer import produce
 from queue_manager import register_consumer
 from rank_config import (
@@ -88,6 +92,7 @@ async def _consume(queue: Queue) -> None:
 
         emb_loss  += train_on_event(event)   # update two-tower embeddings
         rank_loss += train_ranker(event)      # update MLP ranker
+        track_event()                         # periodic evaluation (every EVAL_INTERVAL)
         count     += 1
 
         # FAISS rebuild fires before log so the recommendation at the same
