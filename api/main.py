@@ -4,8 +4,9 @@ FastAPI application entry-point.
 Local:
   uvicorn api.main:app --reload --port 8000
 
-Render (set env vars in dashboard — HF_REPO_ID, HF_TOKEN, REDIS_URL):
+Render:
   uvicorn api.main:app --host 0.0.0.0 --port $PORT
+  (set REDIS_URL in the Render dashboard under Environment)
 """
 
 from __future__ import annotations
@@ -51,52 +52,7 @@ _REQUIRED_ARTIFACTS = [
 
 
 # ------------------------------------------------------------------
-# Step 1 — Download
-# ------------------------------------------------------------------
-
-def _download_artifacts_from_hf(repo_id: str, artifact_dir: Path) -> None:
-    """
-    Pull every missing serving artifact from a HuggingFace Hub model repo.
-
-    Args:
-        repo_id      : e.g. "IntimateUser6969/movielens-recommender"
-        artifact_dir : local directory to save files into
-
-    Auth: reads HF_TOKEN from env (set in Render dashboard or .env).
-    Only downloads files that are not already on disk, so restarts after the
-    first boot are instant.
-    """
-    try:
-        from huggingface_hub import hf_hub_download
-    except ImportError:
-        raise RuntimeError("Run: pip install huggingface_hub")
-
-    token = os.getenv("HF_TOKEN") or None  # None → uses cached login token
-    artifact_dir.mkdir(parents=True, exist_ok=True)
-
-    missing = [f for f in _REQUIRED_ARTIFACTS if not (artifact_dir / f).exists()]
-    if not missing:
-        logger.info("All artifacts already on disk — skipping HuggingFace download.")
-        return
-
-    logger.info(f"Downloading {len(missing)} artifact(s) from '{repo_id}' ...")
-    for filename in missing:
-        logger.info(f"  Fetching {filename}")
-        hf_hub_download(
-            repo_id=repo_id,
-            filename=filename,
-            repo_type="model",
-            local_dir=str(artifact_dir),
-            local_dir_use_symlinks=False,
-            token=token,
-        )
-        logger.info(f"    saved to {artifact_dir / filename}")
-
-    logger.info("HuggingFace download complete.")
-
-
-# ------------------------------------------------------------------
-# Step 2 — Check
+# Step 1 — Check
 # ------------------------------------------------------------------
 
 def _check_artifacts(artifact_dir: Path) -> None:
@@ -107,16 +63,14 @@ def _check_artifacts(artifact_dir: Path) -> None:
             f"\n\n{'='*60}\n"
             f"  Artifacts missing in: {artifact_dir}\n"
             f"  Missing: {', '.join(missing)}\n\n"
-            f"  Option A — train locally:\n"
+            f"  Run training to generate them:\n"
             f"    ./run_training.sh\n"
-            f"  Option B — set HF_REPO_ID (+ HF_TOKEN for private repos)\n"
-            f"    so the API downloads them on first boot.\n"
             f"{'='*60}\n"
         )
 
 
 # ------------------------------------------------------------------
-# Step 3 — Load
+# Step 2 — Load
 # ------------------------------------------------------------------
 
 def load_models(artifact_dir: Path) -> tuple[RecommendationEngine, EventLogger]:
