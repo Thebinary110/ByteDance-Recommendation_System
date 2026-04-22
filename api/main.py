@@ -15,6 +15,11 @@ import os
 from contextlib import asynccontextmanager
 from pathlib import Path
 
+from dotenv import load_dotenv
+
+# Load .env from the recommender/ root before any os.getenv() calls
+load_dotenv(Path(__file__).resolve().parent.parent / ".env")
+
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
@@ -37,29 +42,101 @@ _RECOMMENDER_ROOT = Path(__file__).resolve().parent.parent  # recommender/
 ARTIFACT_DIR = Path(os.getenv("ARTIFACT_DIR", str(_RECOMMENDER_ROOT / "artifacts")))
 
 
+# All artifact filenames that must be present for the engine to start.
+_REQUIRED_ARTIFACTS = [
+    "preprocessor.pkl",
+    "movie_meta.csv",
+    "two_tower.pt",
+    "deepfm_best.pt",
+    "faiss.index",
+    "item_embeddings.npy",
+    "item_features.npy",
+    "user_features.npy",
+]
+
+
 def _check_artifacts(artifact_dir: Path) -> None:
     """Raise a clear RuntimeError if required artifact files are missing."""
-    required = ["preprocessor.pkl", "two_tower.pt", "deepfm_best.pt",
-                "faiss.index", "item_embeddings.npy"]
-    missing = [f for f in required if not (artifact_dir / f).exists()]
+    missing = [f for f in _REQUIRED_ARTIFACTS if not (artifact_dir / f).exists()]
     if missing:
         raise RuntimeError(
             f"\n\n{'='*60}\n"
             f"  Artifacts not found in: {artifact_dir}\n"
             f"  Missing: {', '.join(missing)}\n\n"
-            f"  Run training first:\n"
+            f"  Option A — run training locally:\n"
             f"    cd {_RECOMMENDER_ROOT}\n"
             f"    python -m training.train_two_tower --data_dir ../ --output_dir artifacts/ --sample_frac 0.1\n"
             f"    python -m training.train_deepfm    --output_dir artifacts/\n"
-            f"  (or run ./run_training.sh)\n"
+            f"  Option B — set HF_REPO_ID env var to download from HuggingFace Hub:\n"
+            f"    HF_REPO_ID=your-username/movielens-recommender uvicorn api.main:app\n"
             f"{'='*60}\n"
         )
+
+
+def _download_artifacts_from_hf(artifact_dir: Path, repo_id: str) -> None:
+    """
+    Download missing model artifacts from a HuggingFace Hub model repository.
+
+    Only files that don't already exist locally are fetched, so re-starts are
+    instant once the cache is warm.  Set HF_REPO_ID to enable this path.
+
+    Upload your artifacts first:
+        pip install huggingface_hub
+        huggingface-cli login
+        python - <<'EOF'
+        from huggingface_hub import HfApi
+        HfApi().upload_folder(
+            folder_path="artifacts/",
+            repo_id="your-username/movielens-recommender",
+            repo_type="model",
+        )
+        EOF
+    """
+    try:
+        from huggingface_hub import hf_hub_download
+    except ImportError:
+        raise RuntimeError(
+            "huggingface_hub is not installed. "
+            "Run: pip install huggingface_hub"
+        )
+
+    artifact_dir.mkdir(parents=True, exist_ok=True)
+    missing = [f for f in _REQUIRED_ARTIFACTS if not (artifact_dir / f).exists()]
+
+    if not missing:
+        logger.info("All artifacts already present — skipping HuggingFace download.")
+        return
+
+    logger.info(
+        f"Downloading {len(missing)} artifact(s) from HuggingFace Hub "
+        f"repo '{repo_id}' …"
+    )
+    for filename in missing:
+        logger.info(f"  ↓ {filename}")
+        local_path = hf_hub_download(
+            repo_id=repo_id,
+            filename=filename,
+            repo_type="model",
+            local_dir=str(artifact_dir),
+            local_dir_use_symlinks=False,
+        )
+        logger.info(f"    saved → {local_path}")
+
+    logger.info("HuggingFace artifact download complete.")
 
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     """Load models on startup, release on shutdown."""
     logger.info(f"Loading artifacts from {ARTIFACT_DIR} …")
+
+    # If HF_REPO_ID is set, pull any missing artifacts from HuggingFace Hub
+    # before the existence check.  This is the deployment path; local runs
+    # just skip this block entirely.
+    hf_repo = os.getenv("HF_REPO_ID")
+    if hf_repo:
+        _download_artifacts_from_hf(ARTIFACT_DIR, hf_repo)
+
     _check_artifacts(ARTIFACT_DIR)
 
     feature_store = FeatureStore(

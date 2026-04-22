@@ -24,5 +24,8 @@ kafka-python>=2.0.2
 # Batch processing (optional)
 pyspark>=3.5.0
 
+# Deployment
+huggingface_hub>=0.22.0
+
 # Utilities
 tqdm>=4.66.0

@@ -17,11 +17,18 @@ from __future__ import annotations
 
 import json
 import logging
+import os
 import sqlite3
 from pathlib import Path
 from typing import Optional
 
 import numpy as np
+
+try:
+    from dotenv import load_dotenv as _load_dotenv
+    _load_dotenv(Path(__file__).resolve().parent.parent / ".env")
+except ImportError:
+    pass
 
 logger = logging.getLogger(__name__)
 
@@ -90,15 +97,50 @@ class FeatureStore:
         self._backend = self._connect(redis_host, redis_port, redis_db, sqlite_path)
 
     @staticmethod
+    def _build_upstash_url() -> Optional[str]:
+        """
+        Resolution order for the Redis connection URL:
+
+        1. REDIS_URL        — full rediss:// TCP URL (preferred, works directly with redis-py)
+                              e.g. rediss://default:TOKEN@host:6379
+        2. UPSTASH_REDIS_URL + UPSTASH_REDIS_TOKEN
+                            — Upstash REST URL + separate token; we convert to rediss://
+                              e.g. https://host  →  rediss://default:TOKEN@host:6379
+        3. Neither set      — fall through to local Redis host:port or SQLite
+        """
+        # Priority 1: direct TCP URL already in redis-py format
+        direct = os.getenv("REDIS_URL", "").strip()
+        if direct.startswith("rediss://") or direct.startswith("redis://"):
+            return direct
+
+        # Priority 2: Upstash REST URL + token → construct TCP URL
+        rest_url = os.getenv("UPSTASH_REDIS_URL", "").strip()
+        token = os.getenv("UPSTASH_REDIS_TOKEN", "").strip()
+        if rest_url and token:
+            host = rest_url.replace("https://", "").replace("http://", "").rstrip("/")
+            return f"rediss://default:{token}@{host}:6379"
+
+        return None
+
+    @staticmethod
     def _connect(host, port, db, sqlite_path):
         if _REDIS_AVAILABLE:
             try:
-                client = _redis_lib.Redis(
-                    host=host, port=port, db=db,
-                    socket_connect_timeout=1, decode_responses=True
-                )
-                client.ping()
-                logger.info(f"Feature Store connected to Redis at {host}:{port}")
+                upstash_url = FeatureStore._build_upstash_url()
+                if upstash_url:
+                    # Upstash via TLS Redis protocol — token embedded in URL
+                    client = _redis_lib.from_url(
+                        upstash_url, decode_responses=True, socket_connect_timeout=5
+                    )
+                    client.ping()
+                    logger.info("Feature Store connected to Upstash Redis ✓")
+                else:
+                    client = _redis_lib.Redis(
+                        host=host, port=port, db=db,
+                        socket_connect_timeout=1, decode_responses=True
+                    )
+                    client.ping()
+                    logger.info(f"Feature Store connected to Redis at {host}:{port}")
                 return client
             except Exception as e:
                 logger.warning(f"Redis unavailable ({e}), falling back to SQLite.")
