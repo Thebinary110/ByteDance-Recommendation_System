@@ -148,28 +148,19 @@ def load_models(artifact_dir: Path) -> tuple[RecommendationEngine, EventLogger]:
 # ------------------------------------------------------------------
 # Lifespan — wires the three steps together
 # ------------------------------------------------------------------
-
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    logger.info(f"Starting up — artifact dir: {ARTIFACT_DIR}")
-
-    # Step 1: Download from HuggingFace if running on Render / cold container
-    hf_repo = os.getenv("HF_REPO_ID")
-    if hf_repo:
-        _download_artifacts_from_hf(hf_repo, ARTIFACT_DIR)
-
-    # Step 2: Verify all required files are present
+    logger.info(f"Artifact dir: {ARTIFACT_DIR}")
+    
+    # Artifacts come from GitHub directly — no download needed
     _check_artifacts(ARTIFACT_DIR)
-
-    # Step 3: Load models into memory
+    
     engine, event_logger = load_models(ARTIFACT_DIR)
     set_engine(engine)
     set_event_logger(event_logger)
-
-    logger.info("Startup complete — ready to serve.")
+    
+    logger.info("Startup complete.")
     yield
-
-    logger.info("Shutting down ...")
     event_logger.close()
 
 
