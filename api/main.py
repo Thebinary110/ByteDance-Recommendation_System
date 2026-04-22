@@ -1,11 +1,11 @@
 """
 FastAPI application entry-point.
 
-Start with:
+Local:
   uvicorn api.main:app --reload --port 8000
 
-The app loads all ML models and indexes at startup so every request
-is served from in-memory state with no cold-start penalty.
+Render (set env vars in dashboard — HF_REPO_ID, HF_TOKEN, REDIS_URL):
+  uvicorn api.main:app --host 0.0.0.0 --port $PORT
 """
 
 from __future__ import annotations
@@ -17,7 +17,8 @@ from pathlib import Path
 
 from dotenv import load_dotenv
 
-# Load .env from the recommender/ root before any os.getenv() calls
+# Load .env before any os.getenv() calls — works locally and is a no-op on
+# Render (where env vars are injected directly by the platform).
 load_dotenv(Path(__file__).resolve().parent.parent / ".env")
 
 from fastapi import FastAPI
@@ -34,15 +35,9 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
-# Resolve artifacts relative to the recommender/ root (parent of api/).
-# Using __file__ makes this work regardless of which directory uvicorn is
-# launched from — the relative "artifacts" default used to break when the
-# script was started outside recommender/.
 _RECOMMENDER_ROOT = Path(__file__).resolve().parent.parent  # recommender/
 ARTIFACT_DIR = Path(os.getenv("ARTIFACT_DIR", str(_RECOMMENDER_ROOT / "artifacts")))
 
-
-# All artifact filenames that must be present for the engine to start.
 _REQUIRED_ARTIFACTS = [
     "preprocessor.pkl",
     "movie_meta.csv",
@@ -55,127 +50,147 @@ _REQUIRED_ARTIFACTS = [
 ]
 
 
-def _check_artifacts(artifact_dir: Path) -> None:
-    """Raise a clear RuntimeError if required artifact files are missing."""
-    missing = [f for f in _REQUIRED_ARTIFACTS if not (artifact_dir / f).exists()]
-    if missing:
-        raise RuntimeError(
-            f"\n\n{'='*60}\n"
-            f"  Artifacts not found in: {artifact_dir}\n"
-            f"  Missing: {', '.join(missing)}\n\n"
-            f"  Option A — run training locally:\n"
-            f"    cd {_RECOMMENDER_ROOT}\n"
-            f"    python -m training.train_two_tower --data_dir ../ --output_dir artifacts/ --sample_frac 0.1\n"
-            f"    python -m training.train_deepfm    --output_dir artifacts/\n"
-            f"  Option B — set HF_REPO_ID env var to download from HuggingFace Hub:\n"
-            f"    HF_REPO_ID=your-username/movielens-recommender uvicorn api.main:app\n"
-            f"{'='*60}\n"
-        )
+# ------------------------------------------------------------------
+# Step 1 — Download
+# ------------------------------------------------------------------
 
-
-def _download_artifacts_from_hf(artifact_dir: Path, repo_id: str) -> None:
+def _download_artifacts_from_hf(repo_id: str, artifact_dir: Path) -> None:
     """
-    Download missing model artifacts from a HuggingFace Hub model repository.
+    Pull every missing serving artifact from a HuggingFace Hub model repo.
 
-    Only files that don't already exist locally are fetched, so re-starts are
-    instant once the cache is warm.  Set HF_REPO_ID to enable this path.
+    Args:
+        repo_id      : e.g. "IntimateUser6969/movielens-recommender"
+        artifact_dir : local directory to save files into
 
-    Upload your artifacts first:
-        pip install huggingface_hub
-        huggingface-cli login
-        python - <<'EOF'
-        from huggingface_hub import HfApi
-        HfApi().upload_folder(
-            folder_path="artifacts/",
-            repo_id="your-username/movielens-recommender",
-            repo_type="model",
-        )
-        EOF
+    Auth: reads HF_TOKEN from env (set in Render dashboard or .env).
+    Only downloads files that are not already on disk, so restarts after the
+    first boot are instant.
     """
     try:
         from huggingface_hub import hf_hub_download
     except ImportError:
-        raise RuntimeError(
-            "huggingface_hub is not installed. "
-            "Run: pip install huggingface_hub"
-        )
+        raise RuntimeError("Run: pip install huggingface_hub")
 
+    token = os.getenv("HF_TOKEN") or None  # None → uses cached login token
     artifact_dir.mkdir(parents=True, exist_ok=True)
-    missing = [f for f in _REQUIRED_ARTIFACTS if not (artifact_dir / f).exists()]
 
+    missing = [f for f in _REQUIRED_ARTIFACTS if not (artifact_dir / f).exists()]
     if not missing:
-        logger.info("All artifacts already present — skipping HuggingFace download.")
+        logger.info("All artifacts already on disk — skipping HuggingFace download.")
         return
 
-    logger.info(
-        f"Downloading {len(missing)} artifact(s) from HuggingFace Hub "
-        f"repo '{repo_id}' …"
-    )
+    logger.info(f"Downloading {len(missing)} artifact(s) from '{repo_id}' ...")
     for filename in missing:
-        logger.info(f"  ↓ {filename}")
-        local_path = hf_hub_download(
+        logger.info(f"  Fetching {filename}")
+        hf_hub_download(
             repo_id=repo_id,
             filename=filename,
             repo_type="model",
             local_dir=str(artifact_dir),
             local_dir_use_symlinks=False,
+            token=token,
         )
-        logger.info(f"    saved → {local_path}")
+        logger.info(f"    saved to {artifact_dir / filename}")
 
-    logger.info("HuggingFace artifact download complete.")
+    logger.info("HuggingFace download complete.")
 
 
-@asynccontextmanager
-async def lifespan(app: FastAPI):
-    """Load models on startup, release on shutdown."""
-    logger.info(f"Loading artifacts from {ARTIFACT_DIR} …")
+# ------------------------------------------------------------------
+# Step 2 — Check
+# ------------------------------------------------------------------
 
-    # If HF_REPO_ID is set, pull any missing artifacts from HuggingFace Hub
-    # before the existence check.  This is the deployment path; local runs
-    # just skip this block entirely.
-    hf_repo = os.getenv("HF_REPO_ID")
-    if hf_repo:
-        _download_artifacts_from_hf(ARTIFACT_DIR, hf_repo)
+def _check_artifacts(artifact_dir: Path) -> None:
+    """Raise a descriptive RuntimeError if any required file is missing."""
+    missing = [f for f in _REQUIRED_ARTIFACTS if not (artifact_dir / f).exists()]
+    if missing:
+        raise RuntimeError(
+            f"\n\n{'='*60}\n"
+            f"  Artifacts missing in: {artifact_dir}\n"
+            f"  Missing: {', '.join(missing)}\n\n"
+            f"  Option A — train locally:\n"
+            f"    ./run_training.sh\n"
+            f"  Option B — set HF_REPO_ID (+ HF_TOKEN for private repos)\n"
+            f"    so the API downloads them on first boot.\n"
+            f"{'='*60}\n"
+        )
 
-    _check_artifacts(ARTIFACT_DIR)
 
+# ------------------------------------------------------------------
+# Step 3 — Load
+# ------------------------------------------------------------------
+
+def load_models(artifact_dir: Path) -> tuple[RecommendationEngine, EventLogger]:
+    """
+    Instantiate the feature store, recommendation engine, and event logger.
+    Kept as a plain function so it can be called from tests or CLI without
+    going through the full FastAPI lifespan.
+    """
     feature_store = FeatureStore(
         redis_host=os.getenv("REDIS_HOST", "localhost"),
         redis_port=int(os.getenv("REDIS_PORT", 6379)),
-        sqlite_path=ARTIFACT_DIR / "feature_store.db",
+        sqlite_path=artifact_dir / "feature_store.db",
     )
 
     engine = RecommendationEngine.load(
-        ARTIFACT_DIR,
+        artifact_dir,
         device_str=os.getenv("DEVICE", "cpu"),
         feature_store=feature_store,
     )
-    set_engine(engine)
 
     event_logger = EventLogger(
         kafka_bootstrap=os.getenv("KAFKA_BOOTSTRAP", "localhost:9092"),
-        sqlite_path=ARTIFACT_DIR / "events.db",
+        sqlite_path=artifact_dir / "events.db",
     )
+
+    return engine, event_logger
+
+
+# ------------------------------------------------------------------
+# Lifespan — wires the three steps together
+# ------------------------------------------------------------------
+
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    logger.info(f"Starting up — artifact dir: {ARTIFACT_DIR}")
+
+    # Step 1: Download from HuggingFace if running on Render / cold container
+    hf_repo = os.getenv("HF_REPO_ID")
+    if hf_repo:
+        _download_artifacts_from_hf(hf_repo, ARTIFACT_DIR)
+
+    # Step 2: Verify all required files are present
+    _check_artifacts(ARTIFACT_DIR)
+
+    # Step 3: Load models into memory
+    engine, event_logger = load_models(ARTIFACT_DIR)
+    set_engine(engine)
     set_event_logger(event_logger)
 
-    logger.info("Startup complete — serving requests.")
+    logger.info("Startup complete — ready to serve.")
     yield
 
-    logger.info("Shutting down …")
+    logger.info("Shutting down ...")
     event_logger.close()
 
+
+# ------------------------------------------------------------------
+# App
+# ------------------------------------------------------------------
 
 app = FastAPI(
     title="CineMatch Recommendation API",
     description=(
-        "Production recommendation system powered by Two-Tower candidate retrieval, "
-        "DeepFM ranking, and MMR diversity re-ranking."
+        "Production recommendation system: Two-Tower retrieval, "
+        "DeepFM ranking, MMR diversity re-ranking."
     ),
     version="1.0.0",
     lifespan=lifespan,
 )
 
-# Allow the React dev server (port 5173) and any same-origin requests
+# CORS: accept local dev ports + any *.onrender.com subdomain.
+# CORS_ORIGINS env var lets Render / CI override this without a code change.
+_extra_origins = [o.strip() for o in os.getenv("CORS_ORIGINS", "").split(",") if o.strip()]
+
 app.add_middleware(
     CORSMiddleware,
     allow_origins=[
@@ -187,7 +202,9 @@ app.add_middleware(
         "http://localhost:3000",
         "http://127.0.0.1:5173",
         "http://127.0.0.1:5177",
+        *_extra_origins,
     ],
+    allow_origin_regex=r"https://.*\.onrender\.com",  # matches any Render deploy URL
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],

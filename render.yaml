@@ -1,0 +1,32 @@
+services:
+  - type: web
+    name: cinematch-api
+    runtime: python
+    region: oregon
+    plan: free
+
+    # Render sets $PORT automatically — uvicorn must bind to it
+    startCommand: uvicorn api.main:app --host 0.0.0.0 --port $PORT
+
+    # Point Python's module search path at the recommender/ directory
+    buildCommand: pip install -r requirements.txt
+
+    # Environment variables — sensitive values (HF_TOKEN, REDIS_URL) are set
+    # in the Render dashboard under "Environment", not here.
+    envVars:
+      - key: HF_REPO_ID
+        value: IntimateUser6969/movielens-recommender
+
+      - key: ARTIFACT_DIR
+        value: /opt/render/project/src/artifacts
+
+      - key: DEVICE
+        value: cpu
+
+      # REDIS_URL and HF_TOKEN must be added manually in the Render dashboard
+      # (Environment → Add Environment Variable) to keep secrets out of source control.
+      - key: REDIS_URL
+        sync: false   # tells render.yaml this is a secret — set in dashboard
+
+      - key: HF_TOKEN
+        sync: false
