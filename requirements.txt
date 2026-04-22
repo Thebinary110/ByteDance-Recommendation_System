@@ -1,0 +1,28 @@
+# Core ML
+torch>=2.2.0
+numpy>=1.26.0
+pandas>=2.2.0
+scikit-learn>=1.4.0
+scipy>=1.12.0
+
+# FAISS (use faiss-gpu if CUDA available)
+faiss-cpu>=1.8.0
+faiss-gpu
+
+# API
+fastapi>=0.109.0
+uvicorn[standard]>=0.27.0
+pydantic>=2.6.0
+python-multipart>=0.0.9
+
+# Feature store
+redis>=5.0.0
+
+# Streaming
+kafka-python>=2.0.2
+
+# Batch processing (optional)
+pyspark>=3.5.0
+
+# Utilities
+tqdm>=4.66.0
