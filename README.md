@@ -351,6 +351,7 @@ cd frontend && npm install && npm run dev
 
 | Service | URL |
 |---------|-----|
+| **Live WebSite** | https://byte-dance-recommendation-system.vercel.app/ |
 | **Live API + Docs** | https://intimateuser6969-cinewatch-recommender.hf.space/docs |
 | **HuggingFace Space** | https://huggingface.co/spaces/IntimateUser6969/Cinewatch-recommender |
 | **Model Weights** | https://huggingface.co/IntimateUser6969/movielens-recommender |
