@@ -4,9 +4,9 @@ FastAPI application entry-point.
 Local:
   uvicorn api.main:app --reload --port 8000
 
-Render:
-  uvicorn api.main:app --host 0.0.0.0 --port $PORT
-  (set REDIS_URL in the Render dashboard under Environment)
+HuggingFace Spaces:
+  uvicorn api.main:app --host 0.0.0.0 --port 7860
+  (set REDIS_URL in Space Settings → Secrets)
 """
 
 from __future__ import annotations
@@ -18,8 +18,7 @@ from pathlib import Path
 
 from dotenv import load_dotenv
 
-# Load .env before any os.getenv() calls — works locally and is a no-op on
-# Render (where env vars are injected directly by the platform).
+# Load .env locally — no-op on HuggingFace Spaces (env vars injected by platform)
 load_dotenv(Path(__file__).resolve().parent.parent / ".env")
 
 from fastapi import FastAPI
@@ -100,19 +99,16 @@ def load_models(artifact_dir: Path) -> tuple[RecommendationEngine, EventLogger]:
 
 
 # ------------------------------------------------------------------
-# Lifespan — wires the three steps together
+# Lifespan
 # ------------------------------------------------------------------
+
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     logger.info(f"Artifact dir: {ARTIFACT_DIR}")
-    
-    # Artifacts come from GitHub directly — no download needed
     _check_artifacts(ARTIFACT_DIR)
-    
     engine, event_logger = load_models(ARTIFACT_DIR)
     set_engine(engine)
     set_event_logger(event_logger)
-    
     logger.info("Startup complete.")
     yield
     event_logger.close()
@@ -132,13 +128,13 @@ app = FastAPI(
     lifespan=lifespan,
 )
 
-# CORS: accept local dev ports + any *.onrender.com subdomain.
-# CORS_ORIGINS env var lets Render / CI override this without a code change.
+# CORS: local dev ports + HuggingFace Space + any extra origins from env
 _extra_origins = [o.strip() for o in os.getenv("CORS_ORIGINS", "").split(",") if o.strip()]
 
 app.add_middleware(
     CORSMiddleware,
     allow_origins=[
+        "https://intimateuser6969-cinewatch-recommender.hf.space",
         "http://localhost:5173",
         "http://localhost:5174",
         "http://localhost:5175",
@@ -149,7 +145,6 @@ app.add_middleware(
         "http://127.0.0.1:5177",
         *_extra_origins,
     ],
-    allow_origin_regex=r"https://.*\.onrender\.com",  # matches any Render deploy URL
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],

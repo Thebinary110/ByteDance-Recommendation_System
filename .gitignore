@@ -13,6 +13,7 @@ frontend/node_modules/
 .Python
 build/
 develop-eggs/
+deploy.md
 dist/
 downloads/
 eggs/
